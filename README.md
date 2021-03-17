@@ -1,0 +1,1 @@
+# influx-log4j2-appender
