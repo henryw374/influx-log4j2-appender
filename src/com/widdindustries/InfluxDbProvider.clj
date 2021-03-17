@@ -1,49 +1,68 @@
 (ns com.widdindustries.InfluxDbProvider
-  (:import [
-            org.apache.logging.log4j.core.appender.nosql
+  (:require [com.widdindustries.influx-data :as influx-data])
+  (:import [org.apache.logging.log4j.core.appender.nosql
             NoSqlProvider DefaultNoSqlObject NoSqlConnection NoSqlObject
             NoSqlAppender]
            [org.apache.logging.log4j.status StatusLogger]
            [org.influxdb InfluxDB InfluxDBFactory InfluxDB$ConsistencyLevel]
-           [org.influxdb.dto BatchPoints]
-           (org.apache.logging.log4j.core.layout MessageLayout)))
+           [org.influxdb.dto BatchPoints Point]
+           (org.apache.logging.log4j.core.layout MessageLayout)
+           (java.util.concurrent TimeUnit)
+           (org.apache.logging.log4j.message MapMessage)))
 
-(defn insert [o]
-  (def o o )
-  (.unwrap o)
-  ;(sc.api/spy)
-  
-  )
+(defn point [msg]
+  (->
+    (Point/measurement (influx-data/measurement msg))
+    (.time (System/currentTimeMillis) TimeUnit/MILLISECONDS)
+    (.fields (influx-data/fields msg))
+    (.tag (influx-data/tags msg))
+    (.build)))
 
-(defn connection [influx-url]
-  (reify NoSqlConnection
-    (createObject [_] (DefaultNoSqlObject.))
-    (createList [_ length] (make-array DefaultNoSqlObject length))
-    (insertObject [_ obj]
-      (insert obj))
-    (close [_])
-    (isClosed [_] false)
-    ))
+(defn insert [^InfluxDB influx ^MapMessage o]
+  (def o o)
+  (let [msg (.unwrap o)]
+    (when (influx-data/influx-point? msg)
+      (.write influx ^Point (point msg)))))
 
-(defn provider [influx-url]
-  (reify NoSqlProvider
-    (getConnection [_]
-      (connection influx-url)
-      )))
+(defrecord Connection [influx]
+  NoSqlConnection
+  (createObject [_] (DefaultNoSqlObject.))
+  (createList [_ length] (make-array DefaultNoSqlObject length))
+  (insertObject [_ obj]
+    (insert influx obj))
+  (close [_])
+  (isClosed [_] false))
 
-(defn appender [influx-url buffer-size]
+(def default-config
+  ; Flush every 2000 Points, at least every 10 seconds
+  {:max-points     2000
+   :flush-duration 10
+   :flush-unit     TimeUnit/SECONDS})
+
+(defn influx-connection [{:keys [create-db? database-name influx-url max-points flush-duration flush-unit]}]
+  (let [influx (InfluxDBFactory/connect influx-url)]
+    (when create-db?
+      (.createDatabase influx database-name))
+    (.setDatabase influx database-name)
+    (.enableBatch influx max-points, flush-duration, flush-unit)))
+
+(defrecord Provider [connection]
+  NoSqlProvider
+  (getConnection [_]
+    connection))
+
+(defn provider [config]
+  (Provider.
+    (Connection.
+      (influx-connection
+        (merge default-config config)))))
+
+(defn appender [influx-config buffer-size]
   (-> (NoSqlAppender/newBuilder)
-      (.setName influx-url)
-      (.setProvider (provider influx-url))
+      (.setName (:influx-url influx-config))
+      (.setProvider (provider influx-config))
       (.setBufferSize buffer-size)
       (.setLayout (MessageLayout.))
       (.build)))
-
-
-
-#_(defn no-sql-appender [builder appender-name]
-  (-> builder
-      (.newAppender appender-name, "NoSql")
-      (.add )))
 
 
